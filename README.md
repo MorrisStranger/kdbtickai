@@ -13,10 +13,10 @@ This repository contains:
 The tickerplant must be running before the feed handler connects.
 
 ```bash
-q tick.q schema.q localhost:5010
+q tick.q schema localhost:5010
 ```
 
-`schema.q` should be the schema definition file used by the official KxSystems `tick.q` example. If you do not have one, obtain it from the KxSystems `kdb-tick` repository.
+This loads the schema file at `tick/schema.q`, which defines the `trade` and `quote` tables.
 
 ### Start the feed handler
 
