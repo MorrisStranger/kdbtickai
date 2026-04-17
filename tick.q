@@ -1,123 +1,68 @@
-/ tick.q - KX standard tickerplant with log replay support
-/ Replay usage:
-/   batch:    q tick.q [schema.q] [host:port] -replay /path/to/log -replaymode batch
-/   realtime: q tick.q [schema.q] [host:port] -replay /path/to/log -replaymode realtime [-speed 1.0] [-timecol time]
+/ q tick.q sym . -p 5001 </dev/null >foo 2>&1 &
+/2014.03.12 remove license check
+/2013.09.05 warn on corrupt log
+/2013.08.14 allow <endofday> when -u is set
+/2012.11.09 use timestamp type rather than time. -19h/"t"/.z.Z -> -16h/"n"/.z.P
+/2011.02.10 i->i,j to avoid duplicate data if subscription whilst data in buffer
+/2009.07.30 ts day (and "d"$a instead of floor a)
+/2008.09.09 .k -> .q, 2.4
+/2008.02.03 tick/r.k allow no log
+/2007.09.03 check one day flip
+/2006.10.18 check type?
+/2006.07.24 pub then log
+/2006.02.09 fix(2005.11.28) .z.ts end-of-day
+/2006.01.05 @[;`sym;`g#] in tick.k load
+/2005.12.21 tick/r.k reset `g#sym
+/2005.12.11 feed can send .u.endofday
+/2005.11.28 zero-end-of-day
+/2005.10.28 allow`time on incoming
+/2005.10.10 zero latency
+"kdb+tick 2.8 2014.03.12"
 
+/q tick.q SRC [DST] [-p 5010] [-o h]
+system"l tick/",(src:first .z.x,enlist"sym"),".q"
+
+if[not system"p";system"p 5010"]
+
+\l tick/u.q
 \d .u
-init:{w::t!(count t::`)#enlist(`)!()}
-del:{w[x]_:w[x;;0]?y};`.u.del 0N!
-sel:{$[99h=type w x;select sym from w x where sym in y;w[x]]}
-pub:{[t;x]{[t;x;w]if[count x:sel[t]x;(neg first w)(`.u.upd;t;x)]}[t;x]each w[t]}
-add:{$[(count w x)>i:w[x;;0]?y;[w[x;i;1]:w[x;i;1],z;w[x;i]];w[x],:enlist(y;z)];(x;`\`$(?,)prior distinct$[99h=type w x;key w x;;]w x:. x)}
-sub:{if[x~`;:[(,x)sub'y;]];if[not x in key w;w[x]::()];add[x;y;z]}
-end:{(neg union/[w[;;1]])@\:(`.u.end;x)}
+ld:{if[not type key L::`$(-10_string L),string x;.[L;();:;()]];i::j::-11!(-2;L);if[0<=type i;-2 (string L)," is a corrupt log. Truncate to length ",(string last i)," and restart";exit 1];hopen L};
+tick:{init[];if[not min(`time`sym~2#key flip value@)each t;'`timesym];@[;`sym;`g#]each t;d::.z.D;if[l::count y;L::`$":",y,"/",x,10#".";l::ld d]};
+
+endofday:{end d;d+:1;if[l;hclose l;l::0(`.u.ld;d)]};
+ts:{if[d<x;if[d<x-1;system"t 0";'"more than one day?"];endofday[]]};
+
+if[system"t";
+ .z.ts:{pub'[t;value each t];@[`.;t;@[;`sym;`g#]0#];i::j;ts .z.D};
+ upd:{[t;x]
+ if[not -16=type first first x;if[d<"d"$a:.z.P;.z.ts[]];a:"n"$a;x:$[0>type first x;a,x;(enlist(count first x)#a),x]];
+ t insert x;if[l;l enlist (`upd;t;x);j+:1];}];
+
+if[not system"t";system"t 1000";
+ .z.ts:{ts .z.D};
+ upd:{[t;x]ts"d"$a:.z.P;
+ if[not -16=type first first x;a:"n"$a;x:$[0>type first x;a,x;(enlist(count first x)#a),x]];
+ f:key flip value t;pub[t;$[0>type first x;enlist f!x;flip f!x]];if[l;l enlist (`upd;t;x);i+:1];}];
+
 \d .
+.u.tick[src;.z.x 1];
 
-upd:{[t;x]
- if[not -16h=type first first x;
-   [if[l;l enlist(`upd;t;x)];.u.pub[t;x];:()]];
- t insert x;
- if[l;l enlist(`upd;t;x)];
- .u.pub[t;x]}
+\
+ globals used
+ .u.w - dictionary of tables->(handle;syms)
+ .u.i - msg count in log file
+ .u.j - total msg count (log file plus those held in buffer)
+ .u.t - table names
+ .u.L - tp log filename, e.g. `:./sym2008.09.11
+ .u.l - handle to tp log file
+ .u.d - date
 
-.z.ts:{.u.end .z.d}
-\t 1000
+/test
+>q tick.q
+>q tick/ssl.q
 
-.u.d:.z.d
-.u.L:`:./
-
-if[not("w"~first string .z.o)&.z.K<3.0;
-  .u.l:hopen .u.L:.Q.dd[.u.L;.u.d]]
-
-.u.init[]
-
-/ ============================================================
-/ LOG REPLAY
-/ ============================================================
-
-/ Replay state
-.u.replay.msgs:()        / buffered messages for realtime mode
-.u.replay.idx:0i         / current position in buffer
-.u.replay.starttime:0Np  / wall-clock time replay began
-.u.replay.logstart:0Np   / timestamp of first message in log
-.u.replay.speed:1.0      / playback speed multiplier (2.0 = double speed)
-.u.replay.timecol:`time  / column used for pacing in realtime mode
-
-/ upd override used during log loading - publishes only, never re-logs
-.u.replay.upd:{[t;x] .u.pub[t;x]}
-
-/ Batch replay: push all messages to subscribers as fast as possible.
-/ logfile: symbol or string path to the TP log
-.u.replay.batch:{[logfile]
-  orig:upd;
-  upd::.u.replay.upd;
-  @[-11!; hsym `$string logfile; {'"replay failed: ",x}];
-  upd::orig;
-  0N!"Batch replay complete"}
-
-/ Buffer upd used when loading log for realtime mode
-.u.replay.buffer:{[t;x] .u.replay.msgs,:enlist(t;x)}
-
-/ Extract the leading time value from a message payload.
-/ Handles both table (select first row, named col) and list payloads.
-.u.replay.msgtime:{[x;col]
-  $[98h=type x;
-    first x col;                     / table: first row's time column
-    0h=type x;
-      $[col in cols first x; first(first x)col; first first x];  / list of dicts
-    first x]}                        / plain list - take first element
-
-/ Realtime replay: pace message delivery to match original timing.
-/ logfile : symbol or string path to TP log
-/ timecol : symbol - column name to use for timing (default .u.replay.timecol)
-/ speed   : float  - playback speed multiplier (default .u.replay.speed)
-.u.replay.rt:{[logfile;timecol;speed]
-  .u.replay.msgs:();
-  .u.replay.idx:0i;
-  .u.replay.timecol:timecol;
-  .u.replay.speed:speed;
-  / buffer all messages
-  orig:upd;
-  upd::.u.replay.buffer;
-  @[-11!; hsym `$string logfile; {'"replay load failed: ",x}];
-  upd::orig;
-  if[0=count .u.replay.msgs; 0N!"No messages to replay"; :()];
-  / anchor timing: record wall clock and log start time
-  .u.replay.logstart:.u.replay.msgtime[.u.replay.msgs[0;1]; timecol];
-  .u.replay.starttime:.z.p;
-  / switch timer to replay tick handler
-  .z.ts:.u.replay.tick;
-  \t 10;
-  0N!"Realtime replay started: ",(string count .u.replay.msgs)," messages"}
-
-/ Timer callback for realtime replay.
-/ Flushes all messages whose scaled log-offset has elapsed since replay start.
-.u.replay.tick:{
-  wallElapsed:.z.p - .u.replay.starttime;
-  while[.u.replay.idx < count .u.replay.msgs;
-    msg:.u.replay.msgs .u.replay.idx;
-    / time elapsed in log since first message, scaled by speed
-    logOffset:.u.replay.speed * `timespan$.u.replay.msgtime[msg 1;.u.replay.timecol] - .u.replay.logstart;
-    if[logOffset > wallElapsed; :()];   / not yet due - wait for next tick
-    .u.pub[msg 0; msg 1];
-    .u.replay.idx+:1i];
-  / all messages sent - restore normal end-of-day timer
-  .z.ts:{.u.end .z.d};
-  \t 1000;
-  0N!"Realtime replay complete"}
-
-/ ============================================================
-/ STARTUP: auto-replay if command-line args provided
-/ q tick.q sym -replay ./tp.log -replaymode realtime -speed 2.0 -timecol time
-/ ============================================================
-.u.opts:.Q.opt .z.x
-
-if[`replay in key .u.opts;
-  .u.replayfile:first .u.opts`replay;
-  .u.replaymode:$[`replaymode in key .u.opts; `$first .u.opts`replaymode; `batch];
-  .u.replayspeed:$[`speed in key .u.opts; "F"$first .u.opts`speed; .u.replay.speed];
-  .u.replaytimecol:$[`timecol in key .u.opts; `$first .u.opts`timecol; .u.replay.timecol];
-  0N!"Starting ",(string .u.replaymode)," replay of: ",.u.replayfile;
-  $[.u.replaymode~`realtime;
-    .u.replay.rt[.u.replayfile; .u.replaytimecol; .u.replayspeed];
-    .u.replay.batch .u.replayfile]]
+/run
+>q tick.q sym  .  -p 5010	/tick
+>q tick/r.q :5010 -p 5011	/rdb
+>q sym            -p 5012	/hdb
+>q tick/ssl.q sym :5010		/feed
